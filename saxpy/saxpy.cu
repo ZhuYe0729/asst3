@@ -5,7 +5,13 @@
 #include <driver_functions.h>
 
 #include "CycleTimer.h"
-
+#define CHECK_ERROR(e) { \
+    if(e!=cudaSuccess){\
+        printf("cuda Error:%s",cudaGetErrorString(e));\
+        printf("(file %s:%d)\n",__FILE__,__LINE__);\
+        exit(-1);\
+    }\
+}
 
 // return GB/sec
 float GBPerSec(int bytes, float sec) {
@@ -75,6 +81,13 @@ void saxpyCuda(int N, float alpha, float* xarray, float* yarray, float* resultar
     //
     // https://devblogs.nvidia.com/easy-introduction-cuda-c-and-c/
     //
+    int size = sizeof(float) * N;
+    cudaError_t error = cudaMalloc((void**)&device_x,size);   //notice:cannot use cudaMallocHost,it will out of memory error.
+    CHECK_ERROR(error);
+    error = cudaMalloc((void**)&device_y,size);
+    CHECK_ERROR(error);
+    error = cudaMalloc((void**)&device_result,size);
+    CHECK_ERROR(error);
         
     // start timing after allocation of device memory
     double startTime = CycleTimer::currentSeconds();
@@ -82,15 +95,20 @@ void saxpyCuda(int N, float alpha, float* xarray, float* yarray, float* resultar
     //
     // CS149 TODO: copy input arrays to the GPU using cudaMemcpy
     //
-
+    CHECK_ERROR(cudaMemcpy(device_x,xarray,size,cudaMemcpyHostToDevice)); 
+    CHECK_ERROR(cudaMemcpy(device_y,yarray,size,cudaMemcpyHostToDevice)); 
+    
    
     // run CUDA kernel. (notice the <<< >>> brackets indicating a CUDA
     // kernel launch) Execution on the GPU occurs here.
+    double k_start = CycleTimer::currentSeconds();
     saxpy_kernel<<<blocks, threadsPerBlock>>>(N, alpha, device_x, device_y, device_result);
-
+    cudaDeviceSynchronize();
+    double k_end = CycleTimer::currentSeconds();
     //
     // CS149 TODO: copy result from GPU back to CPU using cudaMemcpy
     //
+    CHECK_ERROR(cudaMemcpy(resultarray,device_result,size,cudaMemcpyDeviceToHost)); 
 
     
     // end timing after result has been copied back into host memory
@@ -103,12 +121,15 @@ void saxpyCuda(int N, float alpha, float* xarray, float* yarray, float* resultar
     }
 
     double overallDuration = endTime - startTime;
+    double kernelDuration = k_end - k_start;
     printf("Effective BW by CUDA saxpy: %.3f ms\t\t[%.3f GB/s]\n", 1000.f * overallDuration, GBPerSec(totalBytes, overallDuration));
-
+    printf("kernel duration: %.3f ms\n",kernelDuration);  //most time is used to data transfer.
     //
     // CS149 TODO: free memory buffers on the GPU using cudaFree
     //
-    
+    cudaFree(device_x);
+    cudaFree(device_y);
+    cudaFree(device_result);
 }
 
 void printCudaInfo() {
