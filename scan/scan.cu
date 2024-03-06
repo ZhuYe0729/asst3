@@ -42,6 +42,37 @@ static inline int nextPow2(int n) {
 // Also, as per the comments in cudaScan(), you can implement an
 // "in-place" scan, since the timing harness makes a copy of input and
 // places it in result
+
+__global__ void upphase(int* input,int n,int step){
+    int idx = blockDim.x*blockIdx.x+threadIdx.x;
+    // if(idx%step==0) input[idx+step-1]+=input[idx+(step>>1)-1];   one
+    int tmp = idx*step;
+    // if(tmp<n) input[tmp+step-1]+=input[tmp+(step>>1)-1];  //error when n is big,integer overflow
+    if(idx<n/step) input[tmp+step-1]+=input[tmp+(step>>1)-1]; 
+}
+
+__global__ void setvalue(int* input,int n){
+    int idx = blockDim.x*blockIdx.x+threadIdx.x;
+    if(idx==0) input[n-1] = 0;
+}
+
+__global__ void downphase(int* input,int n,int step){
+    int idx = blockDim.x*blockIdx.x+threadIdx.x;
+    int halfstep = step>>1;
+    // if(idx%step==0){
+    //     int t = input[idx+halfstep-1];
+    //     input[idx+halfstep-1] = input[idx+step-1];
+    //     input[idx+step-1] += t;
+    // }
+    //integer overflow
+    int tmp = idx*step;  
+    if(idx<n/step){
+        int t = input[tmp+halfstep-1];
+        input[tmp+halfstep-1] = input[tmp+step-1];
+        input[tmp+step-1] += t;
+    }
+}
+
 void exclusive_scan(int* input, int N, int* result)
 {
 
@@ -53,8 +84,39 @@ void exclusive_scan(int* input, int N, int* result)
     // on the CPU.  Your implementation will need to make multiple calls
     // to CUDA kernel functions (that you must write) to implement the
     // scan.
+    int n = nextPow2(N);
+    int num_block = (n-1) / THREADS_PER_BLOCK + 1;
+    dim3 grid(num_block,1,1);
+    dim3 block(THREADS_PER_BLOCK,1,1);
+    for (int two_d = 1; two_d <= n/2; two_d*=2) {
+        int two_dplus1 = 2*two_d;
+        // parallel_for (int i = 0; i < N; i += two_dplus1) {
+        //     output[i+two_dplus1-1] += output[i+two_d-1];
+        // }
+        int tnum = n / two_dplus1;
+        int bnum = (tnum - 1) / THREADS_PER_BLOCK + 1;
+        dim3 tmpgrid = dim3(bnum,1,1);
+        dim3 tmpblock = dim3(min(THREADS_PER_BLOCK,tnum),1,1);
+        upphase<<<tmpgrid,tmpblock>>>(result,n,two_dplus1);
+    }
+    
+    // result[n-1] = 0;  //must in device
+    setvalue<<<dim3(1,1,1),dim3(1,1,1)>>>(result,n);
 
-
+    // downsweep phase
+    for (int two_d = n/2; two_d >= 1; two_d /= 2) {
+        int two_dplus1 = 2*two_d;
+        // parallel_for (int i = 0; i < N; i += two_dplus1) {
+        //     int t = output[i+two_d-1];
+        //     output[i+two_d-1] = output[i+two_dplus1-1];
+        //     output[i+two_dplus1-1] += t;
+        // }
+        int tnum = n / two_dplus1;
+        int bnum = (tnum - 1) / THREADS_PER_BLOCK + 1;
+        dim3 tmpgrid = dim3(bnum,1,1);
+        dim3 tmpblock = dim3(min(THREADS_PER_BLOCK,tnum),1,1);
+        downphase<<<tmpgrid,tmpblock>>>(result,n,two_dplus1);
+    }
 }
 
 
@@ -140,6 +202,25 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
     return overallDuration; 
 }
 
+__global__ void findRepeats(int* input,int length,int* output){
+    int idx = blockDim.x*blockIdx.x + threadIdx.x;
+    if(idx<length-1 && input[idx]==input[idx+1]) output[idx] = 1;
+    else output[idx] = 0;
+}
+
+__global__ void setRepeats(int* flags,int* prefixs,int length,int* output,int* num){
+    int idx = blockDim.x*blockIdx.x + threadIdx.x;
+    if(flags[idx]==1){
+        output[prefixs[idx]] = idx;
+        atomicMax(num,prefixs[idx]+1); 
+    }
+    
+}
+
+__global__ void setval(int* input,int index,int val,bool isArray){
+    if(!isArray) *input = val;
+    else input[index] = val;
+}
 
 // find_repeats --
 //
@@ -160,8 +241,25 @@ int find_repeats(int* device_input, int length, int* device_output) {
     // exclusive_scan function with them. However, your implementation
     // must ensure that the results of find_repeats are correct given
     // the actual array length.
+    int blocknum = (length-1) / THREADS_PER_BLOCK + 1;
+    dim3 grid(blocknum,1,1);
+    dim3 block(THREADS_PER_BLOCK,1,1);
+    int* tmp;  //used to store prefix sum
+    cudaMalloc((void**)&tmp,sizeof(int)*length);
+    findRepeats<<<grid,block>>>(device_input,length,tmp);  //tmp now has the flags
+    cudaDeviceSynchronize();
+    cudaMemcpy(device_input,tmp,sizeof(int)*length,cudaMemcpyDeviceToDevice);
+    exclusive_scan(tmp,length,device_input); //device_input now contain prefix sum of a[i]==a[i+1]
 
-    return 0; 
+    int* num;
+    cudaMalloc((void**)&num,sizeof(int));
+    setval<<<dim3(1),dim3(1)>>>(num,0,0,false);
+    cudaDeviceSynchronize();
+    setRepeats<<<grid,block>>>(tmp,device_input,length,device_output,num);
+    cudaDeviceSynchronize();
+    int res;
+    cudaMemcpy(&res,num,sizeof(int),cudaMemcpyDeviceToHost);
+    return res; 
 }
 
 

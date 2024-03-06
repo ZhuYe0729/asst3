@@ -13,11 +13,11 @@ LOGS	   := logs
 ###########################################################
 
 OBJDIR=objs
-CXX=g++ -m64
+CXX=g++ -m64 -g
 CXXFLAGS=-O3 -Wall
 LDFLAGS=-L/usr/local/cuda/lib64/ -lcudart
 NVCC=nvcc
-NVCCFLAGS=-O3 -m64
+NVCCFLAGS=-O3 -m64 -g -G
 
 
 OBJS=$(OBJDIR)/main.o  $(OBJDIR)/scan.o
