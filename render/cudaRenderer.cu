@@ -31,6 +31,8 @@ struct GlobalConstants {
     int imageWidth;
     int imageHeight;
     float* imageData;
+
+    // int* ids;
 };
 
 // Global variable that is in scope, but read-only, for all cuda
@@ -50,6 +52,7 @@ __constant__ float  cuConstNoise1DValueTable[256];
 #define COLOR_MAP_SIZE 5
 __constant__ float  cuConstColorRamp[COLOR_MAP_SIZE][3];
 
+// __device__ int serialPixelNum;//num of pixel that need serial process
 
 // including parts of the CUDA code from external files to keep this
 // file simpler and to seperate code that should not be modified
@@ -457,6 +460,8 @@ CudaRenderer::~CudaRenderer() {
         delete [] velocity;
         delete [] color;
         delete [] radius;
+
+        delete [] ids;
     }
 
     if (cudaDevicePosition) {
@@ -465,6 +470,8 @@ CudaRenderer::~CudaRenderer() {
         cudaFree(cudaDeviceColor);
         cudaFree(cudaDeviceRadius);
         cudaFree(cudaDeviceImageData);
+    
+        cudaFree(cudaDeviceIds);
     }
 }
 
@@ -519,6 +526,14 @@ CudaRenderer::setup() {
     //
     // See the CUDA Programmer's Guide for descriptions of
     // cudaMalloc and cudaMemcpy
+    int scene_size = image->height*image->width;
+    ids = new int[scene_size];
+    // memset(ids,-2,sizeof(int)*scene_size);  //set -2 to represent no circle
+    for(int i=0;i<scene_size;i++){   //latter optimize
+        ids[i] = -2;
+    }
+    cudaMalloc(&cudaDeviceIds,sizeof(int)*scene_size);
+    cudaMemcpy(cudaDeviceIds,ids,sizeof(int)*scene_size,cudaMemcpyHostToDevice);
 
     cudaMalloc(&cudaDevicePosition, sizeof(float) * 3 * numCircles);
     cudaMalloc(&cudaDeviceVelocity, sizeof(float) * 3 * numCircles);
@@ -549,6 +564,8 @@ CudaRenderer::setup() {
     params.color = cudaDeviceColor;
     params.radius = cudaDeviceRadius;
     params.imageData = cudaDeviceImageData;
+
+    // params.ids = cudaDeviceIds;
 
     cudaMemcpyToSymbol(cuConstRendererParams, &params, sizeof(GlobalConstants));
 
@@ -633,13 +650,143 @@ CudaRenderer::advanceAnimation() {
     cudaDeviceSynchronize();
 }
 
-void
-CudaRenderer::render() {
+// void
+// CudaRenderer::render() {
 
-    // 256 threads per block is a healthy number
+//     // 256 threads per block is a healthy number
+//     dim3 blockDim(256, 1);
+//     dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
+
+//     kernelRenderCircles<<<gridDim, blockDim>>>();
+//     cudaDeviceSynchronize();
+// }
+
+
+__global__ void kernelCheck(int* ids){
+    int idx = blockIdx.x*blockDim.x + threadIdx.x;
+    if(idx>=cuConstRendererParams.numCircles) return ;
+    
+    int index3 = 3 * idx;
+    float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+    float  rad = cuConstRendererParams.radius[idx];
+    short imageWidth = cuConstRendererParams.imageWidth;
+    short imageHeight = cuConstRendererParams.imageHeight;
+    //comput the bounding box of circle
+    short minX = static_cast<short>(imageWidth * (p.x - rad));
+    short maxX = static_cast<short>(imageWidth * (p.x + rad)) + 1;
+    short minY = static_cast<short>(imageHeight * (p.y - rad));
+    short maxY = static_cast<short>(imageHeight * (p.y + rad)) + 1;
+
+    short screenMinX = (minX > 0) ? ((minX < imageWidth) ? minX : imageWidth) : 0;
+    short screenMaxX = (maxX > 0) ? ((maxX < imageWidth) ? maxX : imageWidth) : 0;
+    short screenMinY = (minY > 0) ? ((minY < imageHeight) ? minY : imageHeight) : 0;
+    short screenMaxY = (maxY > 0) ? ((maxY < imageHeight) ? maxY : imageHeight) : 0;
+    
+    float invWidth = 1.f / imageWidth;
+    float invHeight = 1.f / imageHeight;
+    //for all points in the box,check whether is in the circle
+    //in circle: set id,if already has a id or is -1,then set -1
+    //not in circle: continue
+    for (int pixelY=screenMinY; pixelY<screenMaxY; pixelY++) {
+        for (int pixelX=screenMinX; pixelX<screenMaxX; pixelX++) {
+            float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+                                                 invHeight * (static_cast<float>(pixelY) + 0.5f));            
+            float diffX = p.x - pixelCenterNorm.x;
+            float diffY = p.y - pixelCenterNorm.y;
+            float pixelDist = diffX*diffX + diffY*diffY;
+            float maxDist = rad*rad;
+            if(pixelDist > maxDist) continue;
+            // if(ids[pixelY * imageWidth + pixelX]==0) ids[pixelY * imageWidth + pixelX] = idx;
+            // else ids[pixelY * imageWidth + pixelX] = -1;
+            if(atomicCAS(&ids[pixelY * imageWidth + pixelX],-2,idx)!=-2) 
+                //if old is not 0,set -1
+                atomicSub(&ids[pixelY * imageWidth + pixelX],ids[pixelY * imageWidth + pixelX]+1);
+                // atomicSub(&ids[pixelY * imageWidth + pixelX],ids[pixelY * imageWidth + pixelX]+1);
+            //if old == 0,then atomicCAS will set it as idx,so there is no more thing.
+        }
+    }
+}
+
+__device__ __inline__ int
+circleInBox(
+    float circleX, float circleY, float circleRadius,
+    float boxL, float boxR, float boxT, float boxB)
+{
+
+    // clamp circle center to box (finds the closest point on the box)
+    float closestX = (circleX > boxL) ? ((circleX < boxR) ? circleX : boxR) : boxL;
+    float closestY = (circleY > boxB) ? ((circleY < boxT) ? circleY : boxT) : boxB;
+
+    // is circle radius less than the distance to the closest point on
+    // the box?
+    float distX = closestX - circleX;
+    float distY = closestY - circleY;
+
+    if ( ((distX*distX) + (distY*distY)) <= (circleRadius*circleRadius) ) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+__device__ bool pointInCircle(){
+
+}
+
+__global__ void kernelShade(int* ids){
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    short imageWidth = cuConstRendererParams.imageWidth;
+    short imageHeight = cuConstRendererParams.imageHeight;
+
+    int x = idx % imageWidth;
+    int y = idx / imageWidth;
+    
+    float invWidth = 1.f / imageWidth;
+    float invHeight = 1.f / imageHeight;
+    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * idx]);
+    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(x) + 0.5f),
+                                                 invHeight * (static_cast<float>(y) + 0.5f));
+    if(idx>=cuConstRendererParams.imageWidth * cuConstRendererParams.imageHeight) return ;
+    if(ids[idx] == -2) 
+        //nothing to do
+        return;
+    else if(ids[idx] >= 0){
+        //directly shadePixel according id
+        int index3 = 3 * ids[idx];  //circle
+        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+        shadePixel(ids[idx],pixelCenterNorm,p,imgPtr);   //can avoid test !!! change latter.
+    }
+    else {
+        //go through circle,find whether in it
+        //in the circle:shade pixel
+        //not in : continue
+        for(int i=0;i<cuConstRendererParams.numCircles;i++){
+            int index3 = 3 * i;  //circle
+            float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+            float  rad = cuConstRendererParams.radius[i];
+            // if(circleInBox(p.x,p.y,1e-5,x,x,y,y)) 
+                shadePixel(i,pixelCenterNorm,p,imgPtr);
+        }
+        // int index3 = 3 * 1;  //circle
+        // float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+        // shadePixel(1,pixelCenterNorm,p,imgPtr); 
+    }
+    
+}
+
+void
+CudaRenderer::render(){
+    //set id and check if there is overlap
     dim3 blockDim(256, 1);
     dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
-
-    kernelRenderCircles<<<gridDim, blockDim>>>();
+    kernelCheck<<<gridDim,blockDim>>>(this->cudaDeviceIds);
+    cudaDeviceSynchronize();
+    
+    //shade pixels
+    dim3 block(256);
+    dim3 grid((image->height * image->width + block.x-1) / block.x);
+    kernelShade<<<grid,block>>>(this->cudaDeviceIds);
     cudaDeviceSynchronize();
 }
+
+

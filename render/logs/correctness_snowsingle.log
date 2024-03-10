@@ -1,0 +1,27 @@
+Rendering to 1024x1024 image
+Loaded data for 100000 circles from snow.par
+Loaded scene with 100000 circles
+Loaded data for 100000 circles from snow.par
+Loaded scene with 100000 circles
+---------------------------------------------------------
+Initializing CUDA for CudaRenderer
+Found 1 CUDA devices
+Device 0: NVIDIA GeForce RTX 3060 Laptop GPU
+   SMs:        30
+   Global mem: 6144 MB
+   CUDA Cap:   8.6
+---------------------------------------------------------
+
+Running benchmark, 1 frames, beginning at frame 0 ...
+Dumping frames to output_xxx.ppm
+Copying image data from device
+Wrote image file output_0000.ppm
+Copying image data from device
+***************** Correctness check passed **************************
+Clear:    1.7690 ms
+Advance:  0.0008 ms
+Render:   39116.9798 ms
+Total:    39118.7496 ms
+File IO:  61.3452 ms
+
+Overall:  39.4129 sec (note units are seconds)

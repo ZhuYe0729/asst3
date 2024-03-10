@@ -1,0 +1,28 @@
+Rendering to 1024x1024 image
+Loaded scene with 10000 circles
+Loaded scene with 10000 circles
+---------------------------------------------------------
+Initializing CUDA for CudaRenderer
+Found 1 CUDA devices
+Device 0: NVIDIA GeForce RTX 3060 Laptop GPU
+   SMs:        30
+   Global mem: 6144 MB
+   CUDA Cap:   8.6
+---------------------------------------------------------
+
+Running benchmark, 1 frames, beginning at frame 0 ...
+Dumping frames to output_xxx.ppm
+Copying image data from device
+Wrote image file output_0000.ppm
+Copying image data from device
+Mismatch detected at pixel [0][0], value = nan, expected 0.517278 for color Red
+Mismatch detected at pixel [0][0], value = nan, expected 0.457493 for color Green
+Mismatch detected at pixel [0][0], value = nan, expected 0.682798 for color Blue
+***************** Correctness check passed **************************
+Clear:    1.6724 ms
+Advance:  0.0007 ms
+Render:   3964.0937 ms
+Total:    3965.7669 ms
+File IO:  62.3568 ms
+
+Overall:  4.3719 sec (note units are seconds)
